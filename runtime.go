@@ -3,7 +3,6 @@ package gobr
 import (
 	"net/http"
 	"net/http/httptest"
-
 )
 
 type IRuntime interface {
@@ -12,23 +11,27 @@ type IRuntime interface {
 }
 
 type Runtime struct {
-	localMux *http.ServeMux
+	localMux  *http.ServeMux
+	portMux   map[string]*http.ServeMux
+	openPorts map[string]*http.Server
 
-	broadcastPorts map[string]*http.ServeMux
 }
 
 func NewRuntime() *Runtime {
 	return &Runtime{
-		localMux: http.NewServeMux(),
-		broadcastPorts: make(map[string]*http.ServeMux),
+		localMux:  http.NewServeMux(),
+		portMux:   make(map[string]*http.ServeMux),
+		openPorts: make(map[string]*http.Server),
 	}
 }
 
 func (r *Runtime) NewService() *Service {
-	return &Service{
-		runtime: r,
-		Handlers: make(map[string]http.HandlerFunc),
+	ns := &Service{
+		runtime:         r,
+		middlewareStack: make([]func(next http.HandlerFunc) http.HandlerFunc, 0),
+		handlers:        make(map[string]http.HandlerFunc),
 	}
+	return ns
 }
 
 func (r *Runtime) NewClient() *Client {
@@ -38,11 +41,11 @@ func (r *Runtime) NewClient() *Client {
 }
 
 func (r *Runtime) addHandlersToPort(port string, handlers map[string]http.HandlerFunc) {
-	portMux, exists := r.broadcastPorts[port]
+	portMux, exists := r.portMux[port]
 
 	if !exists {
 		portMux = http.NewServeMux()
-		r.broadcastPorts[port] = portMux
+		r.portMux[port] = portMux
 	}
 
 	for pattern, handlerFunc := range handlers {
@@ -50,9 +53,26 @@ func (r *Runtime) addHandlersToPort(port string, handlers map[string]http.Handle
 	}
 }
 
+func (r *Runtime) servePort(port string) {
+	server := &http.Server{Addr: ":" + port, Handler: r.portMux[port]}
+	go server.ListenAndServe()
+	r.openPorts[port] = server
+}
+
+func (r *Runtime) closePort(port string) {
+	r.openPorts[port].Close()
+	delete(r.openPorts, port)
+}
+ 
 func (r *Runtime) ServeAllPorts() {
-	for port, mux := range r.broadcastPorts {
-		go http.ListenAndServe(port, mux)
+	for port, _:= range r.portMux {
+		r.servePort(port)
+	}
+}
+
+func (r *Runtime) CloseAllPorts() {
+	for port, _ := range r.openPorts {
+		r.closePort(port)
 	}
 }
 
@@ -65,7 +85,7 @@ func (r *Runtime) do(req *http.Request) (*http.Response, error) {
 	function, found := r.findLocalHandlerFunc(req)
 
 	if found {
-		return executeLocal(function , req)
+		return executeLocal(function, req)
 	}
 
 	client := http.Client{}
@@ -92,6 +112,3 @@ func executeLocal(handlerFunc http.HandlerFunc, req *http.Request) (*http.Respon
 
 	return w.Result(), nil
 }
-
-
-
