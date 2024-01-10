@@ -6,37 +6,71 @@ import (
 )
 
 type IRuntime interface {
-	NewService() *Service
+	NewService(port string) *Service
 	NewClient() *Client
+
+	Run()
+	Refresh()
 }
 
 type Runtime struct {
+	Active bool
+
+	Services  map[string]*Service
 	localMux  *http.ServeMux
 	portMux   map[string]*http.ServeMux
 	openPorts map[string]*http.Server
-
 }
 
 func NewRuntime() *Runtime {
 	return &Runtime{
+		Active:    false,
+		Services:  make(map[string]*Service),
 		localMux:  http.NewServeMux(),
 		portMux:   make(map[string]*http.ServeMux),
 		openPorts: make(map[string]*http.Server),
 	}
 }
 
-func (r *Runtime) NewService() *Service {
+func (r *Runtime) NewService(cname string, port string) *Service {
 	ns := &Service{
+		Port:            port,
+		Enabled:         true,
 		runtime:         r,
 		middlewareStack: make([]func(next http.HandlerFunc) http.HandlerFunc, 0),
 		handlers:        make(map[string]http.HandlerFunc),
 	}
+
+	r.Services[cname] = ns
 	return ns
 }
 
 func (r *Runtime) NewClient() *Client {
 	return &Client{
 		runtime: r,
+	}
+}
+
+func (r *Runtime) servePort(port string) {
+	server := &http.Server{Addr: ":" + port, Handler: r.portMux[port]}
+	go server.ListenAndServe()
+	r.openPorts[port] = server
+}
+
+func (r *Runtime) closePort(port string) {
+	r.openPorts[port].Close()
+	delete(r.openPorts, port)
+}
+
+func (r *Runtime) ServeAllPorts() {
+	for port := range r.portMux {
+		r.servePort(port)
+	}
+}
+
+func (r *Runtime) CloseAllPorts() {
+	for port := range r.openPorts {
+		r.closePort(port)
 	}
 }
 
@@ -53,27 +87,37 @@ func (r *Runtime) addHandlersToPort(port string, handlers map[string]http.Handle
 	}
 }
 
-func (r *Runtime) servePort(port string) {
-	server := &http.Server{Addr: ":" + port, Handler: r.portMux[port]}
-	go server.ListenAndServe()
-	r.openPorts[port] = server
+func (r *Runtime) refreshServices() {
+	r.portMux = make(map[string]*http.ServeMux)
+	localMux := http.NewServeMux()
+	for _, service := range r.Services {
+		if service.Enabled {
+
+			for pattern, handlerFunc := range service.handlers {
+				localMux.HandleFunc(pattern, handlerFunc)
+			}
+
+			r.addHandlersToPort(service.Port, service.handlers)
+		}
+	}
+	r.localMux = localMux
 }
 
-func (r *Runtime) closePort(port string) {
-	r.openPorts[port].Close()
-	delete(r.openPorts, port)
-}
- 
-func (r *Runtime) ServeAllPorts() {
-	for port, _:= range r.portMux {
-		r.servePort(port)
-	}
+func (r *Runtime) Open() {
+	r.refreshServices()
+	r.ServeAllPorts()
+	r.Active = true
 }
 
-func (r *Runtime) CloseAllPorts() {
-	for port, _ := range r.openPorts {
-		r.closePort(port)
-	}
+func (r *Runtime) Close() {
+	r.CloseAllPorts()
+	r.localMux = http.NewServeMux()
+	r.Active = false
+}
+
+func (r *Runtime) Reboot() {
+	r.Close()
+	r.Open()
 }
 
 // do() will first attempt to complete the request locally before sending a remote request.
@@ -85,7 +129,8 @@ func (r *Runtime) do(req *http.Request) (*http.Response, error) {
 	function, found := r.findLocalHandlerFunc(req)
 
 	if found {
-		return executeLocal(function, req)
+		resp, err := executeLocal(function, req)
+		return resp, err
 	}
 
 	client := http.Client{}

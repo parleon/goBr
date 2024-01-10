@@ -3,9 +3,14 @@ package gobr
 import "net/http"
 
 type IService interface {
+	Use(middleware func(next http.HandlerFunc) http.HandlerFunc)
+	HandleFunc(pattern string, handlerFunc http.HandlerFunc)
 }
 
 type Service struct {
+	Port    string
+	Enabled bool
+
 	middlewareStack []func(next http.HandlerFunc) http.HandlerFunc
 	handlers        map[string]http.HandlerFunc
 	runtime         *Runtime
@@ -23,11 +28,6 @@ func (s *Service) HandleFunc(pattern string, handlerFunc http.HandlerFunc) {
 	}
 
 	s.handlers[pattern] = handlerFunc
-	s.runtime.localMux.HandleFunc(pattern, handlerFunc)
-}
-
-func (s *Service) BroadcastService(port string) {
-	s.runtime.addHandlersToPort(port, s.handlers)
 }
 
 // The middleware is executed recursively such that the nth function wraps the n+1th.
